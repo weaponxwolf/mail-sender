@@ -30,6 +30,8 @@ const SCOPES = [
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/userinfo.profile",
   "profile",
+  "https://www.googleapis.com/auth/gmail.labels",
+  "https://www.googleapis.com/auth/gmail.modify",
 ];
 
 const oAuth2Client = new OAuth2Client(
@@ -65,6 +67,28 @@ app.get("/auth/google/callback", async (req, res) => {
     resourceName: "people/me",
     personFields: "emailAddresses,names,photos",
   });
+
+  const labels = await gmail.users.labels.list({
+    userId: "me",
+  });
+  const labelname = labels.data.labels.find(
+    (label) => label.name === "SENT_REPLY"
+  );
+
+  if (!labelname) {
+    const label = await gmail.users.labels.create({
+      userId: "me",
+      requestBody: {
+        name: "SENT_REPLY",
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      },
+    });
+    req.session.labelId = label.data.id;
+  } else {
+    req.session.labelId = labelname.id;
+  }
+
   const user = {
     name: peopleInfo.data.names[0].displayName,
     email: email.data.emailAddress,
@@ -72,13 +96,13 @@ app.get("/auth/google/callback", async (req, res) => {
     tokens: tokens,
   };
   req.session.user = user;
-  await redisClient.set("datetoday", "none");
+  await redisClient.set(user.email, "none");
   res.redirect("/list-messages");
 });
 
-const GetThreadsToReply = async (gmail) => {
+const GetThreadsToReply = async (email, gmail) => {
   let response1;
-  let datetoday = await redisClient.get("datetoday");
+  let datetoday = await redisClient.get(email);
   if (datetoday === "none") {
     response1 = await gmail.users.threads.list({
       userId: "me",
@@ -114,7 +138,7 @@ const GetThreadsToReply = async (gmail) => {
     response2 = await gmail.users.threads.list({
       userId: "me",
       labelIds: "SENT",
-      q: (await redisClient.get("datetoday")) || "",
+      q: (await redisClient.get(email)) || "",
     });
   }
 
@@ -130,46 +154,46 @@ const GetThreadsToReply = async (gmail) => {
   } else {
     FilteredThreads = recievedThreads;
   }
-
   const messages = await Promise.all(
     FilteredThreads.map(async (thread) => {
-      const message = await gmail.users.messages.get({
-        userId: "me",
-        id: thread.id,
-      });
+      try {
+        const message = await gmail.users.messages.get({
+          userId: "me",
+          id: thread.id,
+        });
+        let from = message.data.payload.headers.find(
+          (header) => header.name === "From"
+        ).value;
+        let subject = message.data.payload.headers.find(
+          (header) => header.name === "Subject"
+        ).value;
+        let messageId = message.data.payload.headers.find(
+          (header) => header.name === "Message-ID"
+        )?.value;
 
-      let from = message.data.payload.headers.find(
-        (header) => header.name === "From"
-      ).value;
-      let subject = message.data.payload.headers.find(
-        (header) => header.name === "Subject"
-      ).value;
-      let messageId = message.data.payload.headers.find(
-        (header) => header.name === "Message-ID"
-      )?.value;
-
-      let noReplyStrings = [
-        "noreply",
-        "no-reply",
-        "no_reply",
-        "noreply@",
-        "no-reply@",
-        "no_reply@",
-        "mailer-daemon",
-      ];
-
-      const containsAny = noReplyStrings.some((v) => from.includes(v));
-
-      if (!containsAny && subject.includes("Re:") === false) {
-        return {
-          threadId: message.data.id,
-          from: from,
-          subject: subject,
-          snippet: message.data.snippet,
-          messageId: messageId,
-        };
+        let noReplyStrings = [
+          "noreply",
+          "no-reply",
+          "no_reply",
+          "noreply@",
+          "no-reply@",
+          "no_reply@",
+          "mailer-daemon",
+        ];
+        const containsAny = noReplyStrings.some((v) => from.includes(v));
+        if (!containsAny && subject.includes("Re:") === false) {
+          return {
+            threadId: message.data.id,
+            from: from,
+            subject: subject,
+            snippet: message.data.snippet,
+            messageId: messageId,
+          };
+        }
+        return null;
+      } catch (error) {
+        return null;
       }
-      return null;
     })
   );
   const nonNullMessages = messages.filter((message) => message !== null);
@@ -184,7 +208,7 @@ app.get("/list-messages", async (req, res) => {
   const tokens = req.session.user.tokens;
   oAuth2Client.setCredentials(tokens);
   const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
-  const messages = await GetThreadsToReply(gmail);
+  const messages = await GetThreadsToReply(req.session.user.email, gmail);
   res.send(messages);
 });
 
@@ -265,10 +289,24 @@ const sendMessagesWithInterval = async (req, messages, gmail) => {
       requestBody: {
         raw: encodedMessage,
         threadId: message.threadId,
-        labelIds: ["SENT REPLY"],
       },
     });
-    console.log(response);
+
+    if (response.status === 200) {
+      console.log("Replied to " + message.from);
+    }
+    try {
+      const modifyResponse = await gmail.users.messages.modify({
+        userId: "me",
+        id: message.threadId,
+        requestBody: {
+          addLabelIds: req.session.labelId,
+        },
+      });
+    } catch (error) {
+      console.log(error);
+    }
+
     await new Promise((resolve) => setTimeout(resolve, 5000));
   });
   const today = new Date();
@@ -280,14 +318,13 @@ const sendMessagesWithInterval = async (req, messages, gmail) => {
     .slice(0, 10)
     .split("-")
     .join("/");
-  console.log(todayString, tomorrowString);
   await redisClient.set(
-    "datetoday",
+    req.session.user.email,
     `after:${todayString} before:${tomorrowString}`
   );
 };
 
-app.get("/send-mail", async (req, res) => {
+app.get("/start-replying", async (req, res) => {
   if (!req.session.user) {
     res.redirect("/auth/google");
     return;
@@ -299,7 +336,7 @@ app.get("/send-mail", async (req, res) => {
   baseIntervalId = setInterval(() => {
     const randomDelay = getRandomInterval(20000, 30000);
     setTimeout(async () => {
-      const messages = await GetThreadsToReply(gmail);
+      const messages = await GetThreadsToReply(req.session.user.email, gmail);
       const response = await sendMessagesWithInterval(req, messages, gmail);
       if (response && response.success === false) {
         clearInterval(baseIntervalId);
@@ -313,10 +350,11 @@ app.get("/send-mail", async (req, res) => {
   res.send("SENDING MESSAGES");
 });
 
-app.get("/stop-mail", (req, res) => {
+app.get("/stop-replying", (req, res) => {
   if (baseIntervalId) {
     clearInterval(baseIntervalId);
     baseIntervalId = null;
+    console.log("MESSAGE SENDING STOPPED");
     res.send("MESSAGE SENDING STOPPED");
   } else {
     res.send("MESSAGE SENDING ALREADY STOPPED");
