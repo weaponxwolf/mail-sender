@@ -11,7 +11,7 @@ Before running the application, ensure you have the following prerequisites inst
 ### Installation
 - 📂 Clone the repository:
 ```
-git clone https://github.com/yourusername/mail-sender.git
+git clone https://github.com/weaponxwolf/mail-sender.git
 ```
 - 📁 Change into the project directory:
 ```
