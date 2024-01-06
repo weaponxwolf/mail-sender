@@ -46,9 +46,9 @@ npm start
 
 - 🔄 After authentication, the application will redirect you to http://localhost:3000/list-messages to display a list of email threads that require a reply.
 
-- 🚀 To start the automated email sending process, visit http://localhost:3000/send-mail. The application will periodically check for new threads and send out-of-office replies.
+- 🚀 To start the automated email sending process, visit http://localhost:3000/start-replying. The application will periodically check for new threads and send out-of-office replies.
 
-- ⏹️ To stop the automated email sending process, visit http://localhost:3000/stop-mail.
+- ⏹️ To stop the automated email sending process, visit http://localhost:3000/stop-replying.
 
 ### Important Notes 
 - 📡 This application uses the Gmail API, and you need to set up a project in the Google Cloud Console to obtain API credentials.
