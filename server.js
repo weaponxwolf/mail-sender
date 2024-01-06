@@ -1,12 +1,23 @@
 require("dotenv").config();
 
 const express = require("express");
+const session = require("express-session");
+
+// IoRedis is Required for Redis Client
+const ioredis = require("ioredis");
+
+// Google API
 const { google } = require("googleapis");
 const { OAuth2Client } = require("google-auth-library");
-const session = require("express-session");
-const ioredis = require("ioredis");
+
+const oAuth2Client = new OAuth2Client(
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
+);
+
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(
   session({
@@ -15,6 +26,12 @@ app.use(
     saveUninitialized: true,
   })
 );
+
+const getRandomInterval = (min, max) => {
+  return Math.floor(Math.random() * (max - min + 1) + min);
+};
+
+let baseIntervalId;
 
 const redisClient = new ioredis({
   port: 6379,
@@ -34,12 +51,7 @@ const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
 ];
 
-const oAuth2Client = new OAuth2Client(
-  process.env.CLIENT_ID,
-  process.env.CLIENT_SECRET,
-  process.env.REDIRECT_URI
-);
-
+//* Routes For Authentication and Authorization
 app.get("/auth/google", (req, res) => {
   const authUrl = oAuth2Client.generateAuthUrl({
     access_type: "offline",
@@ -47,12 +59,6 @@ app.get("/auth/google", (req, res) => {
   });
   res.redirect(authUrl);
 });
-
-const getRandomInterval = (min, max) => {
-  return Math.floor(Math.random() * (max - min + 1) + min);
-};
-
-let baseIntervalId;
 
 app.get("/auth/google/callback", async (req, res) => {
   const { code } = req.query;
@@ -100,9 +106,12 @@ app.get("/auth/google/callback", async (req, res) => {
   res.redirect("/list-messages");
 });
 
+//* Filter Threads to Reply
 const GetThreadsToReply = async (email, gmail) => {
-  let response1;
   let datetoday = await redisClient.get(email);
+
+  //* Get all the Inbox Threads
+  let response1;
   if (datetoday === "none") {
     response1 = await gmail.users.threads.list({
       userId: "me",
@@ -115,19 +124,18 @@ const GetThreadsToReply = async (email, gmail) => {
       q: datetoday,
     });
   }
-  if (!response1) {
+  if (!response1 && !response1.data.threads) {
     return null;
   }
 
-  if (!response1.data.threads) {
-    return null;
-  }
   const recievedThreads = response1.data.threads.map((thread) => {
     return {
       id: thread.id,
     };
   });
   response1 = null;
+
+  //* Get all the Sent Threads
   let response2;
   if (datetoday === "none") {
     response2 = await gmail.users.threads.list({
@@ -142,6 +150,7 @@ const GetThreadsToReply = async (email, gmail) => {
     });
   }
 
+  //* Filter the Threads which are not replied
   let FilteredThreads = [];
   if (response2.data.threads) {
     const sentThreads = response2.data.threads;
@@ -154,6 +163,8 @@ const GetThreadsToReply = async (email, gmail) => {
   } else {
     FilteredThreads = recievedThreads;
   }
+
+  //* Get the Messages from the Threads
   const messages = await Promise.all(
     FilteredThreads.map(async (thread) => {
       try {
@@ -171,6 +182,7 @@ const GetThreadsToReply = async (email, gmail) => {
           (header) => header.name === "Message-ID"
         )?.value;
 
+        //* Filter out the messages from no-reply
         let noReplyStrings = [
           "noreply",
           "no-reply",
@@ -200,18 +212,7 @@ const GetThreadsToReply = async (email, gmail) => {
   return nonNullMessages;
 };
 
-app.get("/list-messages", async (req, res) => {
-  if (!req.session.user) {
-    res.redirect("/auth/google");
-    return;
-  }
-  const tokens = req.session.user.tokens;
-  oAuth2Client.setCredentials(tokens);
-  const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
-  const messages = await GetThreadsToReply(req.session.user.email, gmail);
-  res.send(messages);
-});
-
+//* Send Messages with Interval
 const sendMessagesWithInterval = async (req, messages, gmail) => {
   messages.forEach(async (message) => {
     const email = [
@@ -324,6 +325,20 @@ const sendMessagesWithInterval = async (req, messages, gmail) => {
   );
 };
 
+//* Routes For Listing Messages to Reply
+app.get("/list-messages", async (req, res) => {
+  if (!req.session.user) {
+    res.redirect("/auth/google");
+    return;
+  }
+  const tokens = req.session.user.tokens;
+  oAuth2Client.setCredentials(tokens);
+  const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
+  const messages = await GetThreadsToReply(req.session.user.email, gmail);
+  res.send(messages);
+});
+
+//* Routes For Sending Reply Messages
 app.get("/start-replying", async (req, res) => {
   if (!req.session.user) {
     res.redirect("/auth/google");
@@ -350,6 +365,7 @@ app.get("/start-replying", async (req, res) => {
   res.send("SENDING MESSAGES");
 });
 
+//* Routes For Stopping Reply Messages
 app.get("/stop-replying", (req, res) => {
   if (baseIntervalId) {
     clearInterval(baseIntervalId);
