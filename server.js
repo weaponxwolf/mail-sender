@@ -146,7 +146,7 @@ const GetThreadsToReply = async (email, gmail) => {
     response2 = await gmail.users.threads.list({
       userId: "me",
       labelIds: "SENT",
-      q: (await redisClient.get(email)) || "",
+      q: datetoday,
     });
   }
 
